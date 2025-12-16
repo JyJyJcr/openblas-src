@@ -32,6 +32,7 @@ cblas = []
 lapacke = []
 static = []
 system = []
+ilp64 = []
 
 [dev-dependencies]
 libc = "0.2"

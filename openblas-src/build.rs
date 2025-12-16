@@ -15,9 +15,9 @@ fn run(command: &mut Command) {
     }
 }
 
-fn feature_enabled(feature: &str) -> bool {
-    env::var(format!("CARGO_FEATURE_{}", feature.to_uppercase())).is_ok()
-}
+// fn feature_enabled(feature: &str) -> bool {
+//     env::var(format!("CARGO_FEATURE_{}", feature.to_uppercase())).is_ok()
+// }
 
 /// Add path where pacman (on msys2) install OpenBLAS
 ///
@@ -27,7 +27,8 @@ fn feature_enabled(feature: &str) -> bool {
 /// - But we have to specify them using `-L` in **Windows manner**
 ///   - msys2 `/` is `C:\msys64\` in Windows by default install
 ///   - It can be convert using `cygpath` command
-fn windows_gnu_system() {
+#[cfg(all(target_os = "windows", target_env = "gnu"))]
+fn windows_gnu_system(is_static: bool) -> SymbolConfig {
     let include_path = String::from_utf8(
         Command::new("cygpath")
             .arg("-w")
@@ -40,7 +41,7 @@ fn windows_gnu_system() {
     let lib_path = String::from_utf8(
         Command::new("cygpath")
             .arg("-w")
-            .arg(if feature_enabled("static") {
+            .arg(if is_static {
                 "/mingw64/bin"
             } else {
                 "/mingw64/lib"
@@ -53,24 +54,42 @@ fn windows_gnu_system() {
     println!("cargo:rustc-link-search={}", lib_path);
     println!("cargo:INCLUDE={}", include_path);
     println!("cargo:LIBRARY={}", lib_path);
+
+    // todo! check mingw-w64-x86_64-openblas default status
+    SymbolConfig {
+        has_cblas: true,
+        has_lapack: true,
+        has_lapacke: true,
+        is_64: false,
+        prefix: "".to_string(),
+        suffix: "".to_string(),
+    }
 }
 
 /// Use vcpkg for msvc "system" feature
-fn windows_msvc_system() {
-    if !feature_enabled("static") {
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+fn windows_msvc_system(is_static: bool) -> SymbolConfig {
+    if !is_static {
         env::set_var("VCPKGRS_DYNAMIC", "1");
     }
     #[cfg(target_env = "msvc")]
     vcpkg::find_package("openblas").expect(
         "vcpkg failed to find OpenBLAS package , Try to install it using `vcpkg install openblas:$(ARCH)-windows(-static)(-md)`"
     );
-    if !cfg!(target_env = "msvc") {
-        unreachable!();
+    // todo! check vcpkg openblas default status
+    SymbolConfig {
+        has_cblas: true,
+        has_lapack: true,
+        has_lapacke: true,
+        is_64: false,
+        prefix: "".to_string(),
+        suffix: "".to_string(),
     }
 }
 
 /// Add linker flag (`-L`) to path where brew installs OpenBLAS
-fn macos_system() {
+#[cfg(target_os = "macos")]
+fn macos_system(is_static: bool, is_ilp64: bool) -> SymbolConfig {
     fn brew_prefix(target: &str) -> PathBuf {
         let out = Command::new("brew")
             .arg("--prefix")
@@ -81,48 +100,106 @@ fn macos_system() {
         let path = String::from_utf8(out.stdout).expect("Non-UTF8 path by `brew --prefix`");
         PathBuf::from(path.trim())
     }
-    let openblas = brew_prefix("openblas");
+    let openblas = brew_prefix(if is_ilp64 { "openblas64" } else { "openblas" });
     let libomp = brew_prefix("libomp");
 
     println!("cargo:rustc-link-search={}/lib", openblas.display());
     println!("cargo:rustc-link-search={}/lib", libomp.display());
     println!("cargo:INCLUDE={}", openblas.join("include").display());
     println!("cargo:LIBRARY={}", openblas.join("lib").display());
+    println!(
+        "cargo:rustc-link-lib={}={}",
+        if is_static { "static" } else { "dylib" },
+        if is_ilp64 { "openblas64_" } else { "openblas" }
+    );
+    SymbolConfig {
+        has_cblas: true,
+        has_lapack: true,
+        has_lapacke: true,
+        is_64: is_ilp64,
+        prefix: "".to_string(),
+        suffix: if is_ilp64 { "64_" } else { "" }.to_string(),
+    }
+}
+
+// #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+// enum LinkKind {
+//     Static,
+//     Dynamic,
+// }
+
+fn pkg_config(is_static: bool, is_ilp64: bool) -> Option<SymbolConfig> {
+    let libname = if is_ilp64 { "openblas64" } else { "openblas" };
+
+    if pkg_config::Config::new()
+        .statik(is_static)
+        .probe(libname)
+        .is_ok()
+    {
+        // if openblas is found, get variables should never fail
+        let prefix = pkg_config::get_variable(libname, "libprefix")
+            .expect("OpenBLAS pkg-config .pc file lacks variable `libprefix`");
+        let suffix = pkg_config::get_variable(libname, "libsuffix")
+            .expect("OpenBLAS pkg-config .pc file lacks variable `libsuffix`");
+        let openblas_config = pkg_config::get_variable(libname, "openblas_config")
+            .expect("OpenBLAS pkg-config .pc file lacks variable `openblas_config`");
+
+        let has_cblas = !openblas_config.contains("NO_CBLAS=1");
+        let has_lapack = !openblas_config.contains("NO_LAPACK=1");
+        let has_lapacke = !openblas_config.contains("NO_LAPACKE=1");
+
+        Some(SymbolConfig {
+            has_cblas,
+            has_lapack,
+            has_lapacke,
+            is_64: is_ilp64,
+            prefix,
+            suffix,
+        })
+    } else {
+        None
+    }
 }
 
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
     if env::var("DOCS_RS").is_ok() {
         return;
     }
-    let link_kind = if feature_enabled("static") {
-        "static"
-    } else {
-        "dylib"
-    };
-    if feature_enabled("system") {
-        // Use pkg-config to find OpenBLAS
-        if pkg_config::Config::new()
-            .statik(feature_enabled("static"))
-            .probe("openblas")
-            .is_ok()
-        {
-            return;
-        }
+    let is_static = cfg!(feature = "static");
+    let is_ilp64 = cfg!(feature = "ilp64");
 
-        if cfg!(target_os = "windows") {
-            if cfg!(target_env = "gnu") {
-                windows_gnu_system();
-            } else if cfg!(target_env = "msvc") {
-                windows_msvc_system();
-            } else {
-                panic!(
-                    "Unsupported ABI for Windows: {}",
-                    env::var("CARGO_CFG_TARGET_ENV").unwrap()
-                );
+    let config = if cfg!(feature = "system") {
+        // Use pkg-config to find OpenBLAS
+        if let Some(config) = pkg_config(is_static, is_ilp64) {
+            config
+        } else {
+            #[cfg(target_os = "windows")]
+            {
+                #[cfg(target_env = "gnu")]
+                {
+                    windows_gnu_system(is_static)
+                }
+                #[cfg(target_env = "msvc")]
+                {
+                    windows_msvc_system(is_static)
+                }
+                #[cfg(not(any(target_env = "gnu", target_env = "msvc")))]
+                {
+                    panic!(
+                        "Unsupported ABI for Windows: {}",
+                        env::var("CARGO_CFG_TARGET_ENV").unwrap()
+                    );
+                }
             }
-        }
-        if cfg!(target_os = "macos") {
-            macos_system();
+            #[cfg(target_os = "macos")]
+            {
+                macos_system(is_static, is_ilp64)
+            }
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            {
+                panic!("Cannot find OpenBLAS using pkg-config");
+            }
         }
     } else {
         if cfg!(target_env = "msvc") {
@@ -130,30 +207,36 @@ fn main() {
                 "Non-vcpkg builds are not supported on Windows. You must use the 'system' feature."
             )
         }
-        build();
-    }
-    println!("cargo:rustc-link-lib={}=openblas", link_kind);
+        build(is_static, is_ilp64)
+    };
+    print_symbol_config(&config);
 }
 
 /// Build OpenBLAS using openblas-build crate
-fn build() {
+fn build(is_static: bool, is_ilp64: bool) -> SymbolConfig {
     println!("cargo:rerun-if-env-changed=OPENBLAS_TARGET");
     println!("cargo:rerun-if-env-changed=OPENBLAS_CC");
     println!("cargo:rerun-if-env-changed=OPENBLAS_HOSTCC");
     println!("cargo:rerun-if-env-changed=OPENBLAS_FC");
     println!("cargo:rerun-if-env-changed=OPENBLAS_RANLIB");
     let mut cfg = openblas_build::Configure::default();
-    if !feature_enabled("cblas") {
+    if !cfg!(feature = "cblas") {
         cfg.no_cblas = true;
     }
-    if !feature_enabled("lapacke") {
+    if !cfg!(feature = "lapacke") {
         cfg.no_lapacke = true;
     }
-    if feature_enabled("static") {
+    if is_static {
         cfg.no_shared = true;
     } else {
         cfg.no_static = true;
     }
+    if is_ilp64 {
+        cfg.interface = openblas_build::Interface::ILP64;
+    } else {
+        cfg.interface = openblas_build::Interface::LP64;
+    }
+
     if let Ok(target) = env::var("OPENBLAS_TARGET") {
         cfg.target = Some(
             target
@@ -168,7 +251,18 @@ fn build() {
     cfg.compilers.fc = env::var("OPENBLAS_FC").ok();
     cfg.compilers.ranlib = env::var("OPENBLAS_RANLIB").ok();
 
-    let output = if feature_enabled("cache") {
+    let cfg = cfg;
+
+    let symbol_config = SymbolConfig {
+        has_cblas: !cfg.no_cblas,
+        has_lapack: !cfg.no_lapack,
+        has_lapacke: !cfg.no_lapacke,
+        is_64: is_ilp64,
+        prefix: "".to_string(),
+        suffix: "".to_string(),
+    };
+
+    let output = if cfg!(feature = "cache") {
         use std::{
             collections::hash_map::DefaultHasher,
             hash::{Hash, Hasher},
@@ -204,7 +298,7 @@ fn build() {
     //
     // Be sure that `cargo:warning` is shown only when openblas-src is build as path dependency...
     // https://doc.rust-lang.org/cargo/reference/build-scripts.html#cargowarningmessage
-    if !feature_enabled("static") {
+    if !is_static {
         let ld_name = if cfg!(target_os = "macos") {
             "DYLD_LIBRARY_PATH"
         } else {
@@ -246,4 +340,36 @@ fn build() {
     for lib in &make_conf.f_extra_libs.libs {
         println!("cargo:rustc-link-lib={}", lib);
     }
+    println!(
+        "cargo:rustc-link-lib={}=openblas",
+        if is_static { "static" } else { "dylib" },
+    );
+
+    symbol_config
+}
+
+struct SymbolConfig {
+    has_cblas: bool,
+    has_lapack: bool,
+    has_lapacke: bool,
+    is_64: bool,
+    prefix: String,
+    suffix: String,
+}
+
+fn print_symbol_config(config: &SymbolConfig) {
+    if config.has_cblas {
+        println!("cargo:cblas=1");
+    }
+    if config.has_lapack {
+        println!("cargo:lapack=1");
+    }
+    if config.has_lapacke {
+        println!("cargo:lapacke=1");
+    }
+    if config.is_64 {
+        println!("cargo:is_64=1");
+    }
+    println!("cargo:prefix={}", config.prefix);
+    println!("cargo:suffix={}", config.suffix);
 }
