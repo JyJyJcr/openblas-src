@@ -25,7 +25,7 @@ links = "openblas"
 rust-version = "1.71.1"
 
 [features]
-default = ["cblas", "lapacke"]
+default = ["cblas", "lapack", "lapacke"]
 
 cache = []
 # build options
