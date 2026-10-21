@@ -28,7 +28,9 @@ rust-version = "1.71.1"
 default = ["cblas", "lapacke"]
 
 cache = []
+# build options
 cblas = []
+lapack = []
 lapacke = []
 static = []
 system = []

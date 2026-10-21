@@ -223,6 +223,9 @@ fn build(is_static: bool, is_ilp64: bool) -> SymbolConfig {
     if !cfg!(feature = "cblas") {
         cfg.no_cblas = true;
     }
+    if !cfg!(feature = "lapack") {
+        cfg.no_lapack = true;
+    }
     if !cfg!(feature = "lapacke") {
         cfg.no_lapacke = true;
     }
