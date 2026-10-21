@@ -128,31 +128,46 @@ fn macos_system(is_static: bool, is_ilp64: bool) -> SymbolConfig {
 //     Dynamic,
 // }
 
-fn pkg_config(is_static: bool, is_ilp64: bool) -> Option<SymbolConfig> {
-    let libname = if is_ilp64 { "openblas64" } else { "openblas" };
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum IntPreference {
+    LP64,
+    ILP64,
+    Any,
+}
+impl IntPreference {
+    fn may_ilp64(&self) -> bool {
+        matches!(self, IntPreference::ILP64 | IntPreference::Any)
+    }
+}
 
+fn pkg_config(is_static: bool, pkgname: &str) -> Option<SymbolConfig> {
     if pkg_config::Config::new()
         .statik(is_static)
-        .probe(libname)
+        .probe(pkgname)
         .is_ok()
     {
         // if openblas is found, get variables should never fail
-        let prefix = pkg_config::get_variable(libname, "libprefix")
+        let prefix = pkg_config::get_variable(pkgname, "libprefix")
             .expect("OpenBLAS pkg-config .pc file lacks variable `libprefix`");
-        let suffix = pkg_config::get_variable(libname, "libsuffix")
+        let suffix = pkg_config::get_variable(pkgname, "libsuffix")
             .expect("OpenBLAS pkg-config .pc file lacks variable `libsuffix`");
-        let openblas_config = pkg_config::get_variable(libname, "openblas_config")
+        let openblas_config = pkg_config::get_variable(pkgname, "openblas_config")
             .expect("OpenBLAS pkg-config .pc file lacks variable `openblas_config`");
 
-        let has_cblas = !openblas_config.contains("NO_CBLAS=1");
-        let has_lapack = !openblas_config.contains("NO_LAPACK=1");
-        let has_lapacke = !openblas_config.contains("NO_LAPACKE=1");
+        let has_cblas =
+            !(openblas_config.contains("NO_CBLAS=1") || openblas_config.contains("NO_CBLAS=TRUE"));
+        let has_lapack = !(openblas_config.contains("NO_LAPACK=1")
+            || openblas_config.contains("NO_LAPACK=TRUE"));
+        let has_lapacke = !(openblas_config.contains("NO_LAPACKE=1")
+            || openblas_config.contains("NO_LAPACKE=TRUE"));
+        let is_64 = openblas_config.contains("USE_64BITINT=1")
+            || openblas_config.contains("USE_64BITINT=TRUE");
 
         Some(SymbolConfig {
             has_cblas,
             has_lapack,
             has_lapacke,
-            is_64: is_ilp64,
+            is_64,
             prefix,
             suffix,
         })
@@ -167,49 +182,66 @@ fn main() {
         return;
     }
     let is_static = cfg!(feature = "static");
-    let is_ilp64 = cfg!(feature = "ilp64");
+
+    let int_preference = match (cfg!(feature = "lp64"), cfg!(feature = "ilp64")) {
+        (true, false) => IntPreference::LP64,
+        (false, true) => IntPreference::ILP64,
+        (false, false) => IntPreference::Any,
+        (true, true) => panic!("Cannot enable both lp64 and ilp64 features"),
+    };
 
     let config = if cfg!(feature = "system") {
-        // Use pkg-config to find OpenBLAS
-        if let Some(config) = pkg_config(is_static, is_ilp64) {
-            config
-        } else {
-            #[cfg(target_os = "windows")]
-            {
-                #[cfg(target_env = "gnu")]
-                {
-                    windows_gnu_system(is_static)
-                }
-                #[cfg(target_env = "msvc")]
-                {
-                    windows_msvc_system(is_static)
-                }
-                #[cfg(not(any(target_env = "gnu", target_env = "msvc")))]
-                {
-                    panic!(
-                        "Unsupported ABI for Windows: {}",
-                        env::var("CARGO_CFG_TARGET_ENV").unwrap()
-                    );
-                }
-            }
-            #[cfg(target_os = "macos")]
-            {
-                macos_system(is_static, is_ilp64)
-            }
-            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-            {
-                panic!("Cannot find OpenBLAS using pkg-config");
-            }
-        }
+        search(is_static, int_preference)
     } else {
         if cfg!(target_env = "msvc") {
             panic!(
                 "Non-vcpkg builds are not supported on Windows. You must use the 'system' feature."
             )
         }
-        build(is_static, is_ilp64)
+        build(is_static, int_preference.may_ilp64())
     };
     print_symbol_config(&config);
+}
+
+fn search(is_static: bool, int_preference: IntPreference) -> SymbolConfig {
+    // Use pkg-config to find OpenBLAS
+    if cfg!(feature = "pkg-config") {
+        let pkgname = if int_preference == IntPreference::ILP64 {
+            "openblas64"
+        } else {
+            "openblas"
+        };
+        if let Some(config) = pkg_config(is_static, pkgname) {
+            return config;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        #[cfg(target_env = "gnu")]
+        {
+            windows_gnu_system(is_static)
+        }
+        #[cfg(target_env = "msvc")]
+        {
+            windows_msvc_system(is_static)
+        }
+        #[cfg(not(any(target_env = "gnu", target_env = "msvc")))]
+        {
+            panic!(
+                "Unsupported ABI for Windows: {}",
+                env::var("CARGO_CFG_TARGET_ENV").unwrap()
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_system(is_static, int_preference.may_ilp64())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        panic!("Cannot find OpenBLAS using pkg-config");
+    }
 }
 
 /// Build OpenBLAS using openblas-build crate

@@ -32,9 +32,17 @@ cache = []
 cblas = []
 lapack = []
 lapacke = []
-static = []
-system = []
+
+# bit size preference
+lp64 = []
 ilp64 = []
+
+static = []
+
+# system library options
+system = []
+pkg-config = ["system"]
+
 
 [dev-dependencies]
 libc = "0.2"
