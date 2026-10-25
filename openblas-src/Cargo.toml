@@ -37,20 +37,22 @@ lapacke = []
 lp64 = []
 ilp64 = []
 
+# link option
 static = []
 
-# system library options
+# library options
+build = ["dep:openblas-build", "dep:dirs"]
 system = []
-pkg-config = ["system"]
+pkg-config = ["system", "dep:pkg-config"]
 
 
 [dev-dependencies]
 libc = "0.2"
 
 [build-dependencies]
-pkg-config = "0.3.30"
-dirs = "6.0.0"
-openblas-build = { version = "0.10.13", path = "../openblas-build" }
+pkg-config = { version = "0.3.30", optional = true }
+dirs = { version = "6.0.0", optional = true }
+openblas-build = { version = "0.10.13", path = "../openblas-build", optional = true }
 
 [target.'cfg(target_os="windows")'.build-dependencies]
 vcpkg = "0.2"

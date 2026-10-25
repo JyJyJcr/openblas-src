@@ -140,6 +140,7 @@ impl IntPreference {
     }
 }
 
+#[cfg(feature = "pkg-config")]
 fn pkg_config(is_static: bool, pkgname: &str) -> Option<SymbolConfig> {
     if pkg_config::Config::new()
         .statik(is_static)
@@ -190,22 +191,43 @@ fn main() {
         (true, true) => panic!("Cannot enable both lp64 and ilp64 features"),
     };
 
-    let config = if cfg!(feature = "system") {
-        search(is_static, int_preference)
+    let use_system = match (cfg!(feature = "system"), cfg!(feature = "build")) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => panic!("You must enable either the 'system' or 'build' feature"),
+    };
+
+    let config = if use_system {
+        #[cfg(feature = "system")]
+        {
+            search(is_static, int_preference)
+        }
+        #[cfg(not(feature = "system"))]
+        {
+            unreachable!()
+        }
     } else {
-        if cfg!(target_env = "msvc") {
-            panic!(
+        #[cfg(feature = "build")]
+        {
+            if cfg!(target_env = "msvc") {
+                panic!(
                 "Non-vcpkg builds are not supported on Windows. You must use the 'system' feature."
             )
+            }
+            build(is_static, int_preference.may_ilp64())
         }
-        build(is_static, int_preference.may_ilp64())
+        #[cfg(not(feature = "build"))]
+        {
+            unreachable!()
+        }
     };
     print_symbol_config(&config);
 }
 
 fn search(is_static: bool, int_preference: IntPreference) -> SymbolConfig {
     // Use pkg-config to find OpenBLAS
-    if cfg!(feature = "pkg-config") {
+    #[cfg(feature = "pkg-config")]
+    {
         let pkgname = if int_preference == IntPreference::ILP64 {
             "openblas64"
         } else {
@@ -244,6 +266,7 @@ fn search(is_static: bool, int_preference: IntPreference) -> SymbolConfig {
     }
 }
 
+#[cfg(feature = "build")]
 /// Build OpenBLAS using openblas-build crate
 fn build(is_static: bool, is_ilp64: bool) -> SymbolConfig {
     println!("cargo:rerun-if-env-changed=OPENBLAS_TARGET");
